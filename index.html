@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<link rel="manifest" href="manifest.webmanifest">
+<title>IceStock</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#111827;background:#f3f4f6}
+*{box-sizing:border-box}body{margin:0}.app{max-width:700px;margin:auto;padding:16px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+h1{font-size:28px;margin:0}.muted{color:#6b7280;font-size:14px}
+.card{background:white;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 2px 12px #0000000d}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}.stat{background:#eef2ff;border-radius:14px;padding:14px}.num{font-size:30px;font-weight:800}
+button,input{font:inherit}button{border:0;border-radius:12px;padding:12px 15px;cursor:pointer}
+.primary{background:#111827;color:white;font-weight:700}.secondary{background:#e5e7eb}.danger{background:#fee2e2;color:#991b1b}
+.row{display:flex;gap:8px;align-items:center}.row>*{flex:1}input{width:100%;padding:11px;border:1px solid #d1d5db;border-radius:10px}
+.item{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid #eee}
+.item:last-child{border-bottom:0}.controls{display:flex;gap:6px;align-items:center}.controls button{padding:7px 11px}.count{font-weight:800;min-width:30px;text-align:center}
+#scanner{display:none;position:fixed;inset:0;background:#000;z-index:10;padding:12px}
+#video{width:100%;height:75%;object-fit:cover;border-radius:14px;margin-top:35px}
+.scanbar{position:fixed;left:20px;right:20px;top:45%;height:2px;background:white}
+.close{position:absolute;top:12px;right:12px;z-index:2;background:white}
+.notice{padding:10px;background:#fff7ed;border-radius:10px;font-size:14px}
+</style>
+</head>
+<body>
+<div class="app">
+<header><div><h1>🍦 IceStock</h1><div class="muted">Inventario de helados</div></div></header>
+
+<div class="stats">
+  <div class="stat"><div class="muted">Tarrinas</div><div id="total" class="num">0</div></div>
+  <div class="stat"><div class="muted">Sabores</div><div id="flavors" class="num">0</div></div>
+</div>
+
+<div class="card">
+  <button class="primary" style="width:100%;font-size:18px" onclick="openScanner()">📷 Escanear tarrina</button>
+  <div class="row" style="margin-top:10px">
+    <input id="manualCode" placeholder="Código, ej. S48167">
+    <button class="secondary" onclick="manualAdd()">Añadir</button>
+  </div>
+  <div class="muted" style="margin-top:8px">Cada escaneo suma 1 unidad.</div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <input id="search" placeholder="Buscar sabor o código" oninput="render()">
+    <button class="secondary" onclick="exportCSV()">CSV</button>
+  </div>
+  <div id="inventory"></div>
+</div>
+
+<div class="card">
+  <b>Códigos conocidos</b>
+  <div id="codes"></div>
+  <div class="row" style="margin-top:10px">
+    <input id="newCode" placeholder="Código">
+    <input id="newFlavor" placeholder="Sabor">
+    <button class="secondary" onclick="addCode()">Guardar</button>
+  </div>
+</div>
+
+<div class="card">
+  <button class="secondary" onclick="resetData()">Restablecer datos</button>
+</div>
+</div>
+
+<div id="scanner">
+  <button class="close" onclick="closeScanner()">✕ Cerrar</button>
+  <video id="video" autoplay playsinline muted></video>
+  <div class="scanbar"></div>
+  <div id="scanStatus" style="position:fixed;bottom:20px;left:20px;right:20px;color:white;text-align:center"></div>
+</div>
+
+<!-- Lector de códigos más compatible que BarcodeDetector nativo -->
+<script src="https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
+
+<script>
+const KEY="icestock-v1";
+let db=JSON.parse(localStorage.getItem(KEY)||"null")||{
+  stock:{}, codes:{"S48167":"Helado de Banana Split"}
+};
+
+let scanning=false, lastCode="", lastAt=0;
+let codeReader=null, scanControls=null;
+
+function save(){localStorage.setItem(KEY,JSON.stringify(db));render()}
+function total(){return Object.values(db.stock).reduce((a,b)=>a+b,0)}
+function render(){
+  document.getElementById("total").textContent=total();
+  document.getElementById("flavors").textContent=Object.keys(db.stock).length;
+  const q=(document.getElementById("search").value||"").toLowerCase();
+  const entries=Object.entries(db.stock).filter(([c,n])=>
+    c.toLowerCase().includes(q)||(db.codes[c]||"").toLowerCase().includes(q));
+  document.getElementById("inventory").innerHTML=entries.length?entries.map(([c,n])=>`
+    <div class="item"><div><b>${esc(db.codes[c]||"Código "+c)}</b><div class="muted">${esc(c)}</div></div>
+    <div class="controls"><button class="secondary" onclick="change('${escAttr(c)}',-1)">−</button>
+    <span class="count">${n}</span><button class="secondary" onclick="change('${escAttr(c)}',1)">+</button></div></div>`).join("")
+    : '<div class="muted" style="padding:15px 0">Todavía no hay stock.</div>';
+  document.getElementById("codes").innerHTML=Object.entries(db.codes).map(([c,f])=>
+    `<div class="item"><div><b>${esc(f)}</b><div class="muted">${esc(c)}</div></div>
+    <button class="danger" onclick="deleteCode('${escAttr(c)}')">Eliminar</button></div>`).join("");
+}
+function esc(s){return String(s).replace(/[&<>\"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+function escAttr(s){return String(s).replace(/\\/g,"\\\\").replace(/'/g,"\\'")}
+function change(c,d){db.stock[c]=Math.max(0,(db.stock[c]||0)+d);if(!db.stock[c])delete db.stock[c];save()}
+function addCode(){
+  const c=document.getElementById("newCode").value.trim(), f=document.getElementById("newFlavor").value.trim();
+  if(!c||!f)return alert("Escribe el código y el sabor.");
+  db.codes[c]=f;save();document.getElementById("newCode").value="";document.getElementById("newFlavor").value="";
+}
+function deleteCode(c){if(confirm("¿Eliminar este código?")){delete db.codes[c];save()}}
+function add(c){
+  if(!db.codes[c]){
+    const f=prompt("Código nuevo. ¿Qué sabor corresponde a "+c+"?");
+    if(!f)return;
+    db.codes[c]=f;
+  }
+  db.stock[c]=(db.stock[c]||0)+1;save();
+  if(navigator.vibrate)navigator.vibrate(120);
+}
+function manualAdd(){
+  const c=document.getElementById("manualCode").value.trim();
+  if(c){add(c);document.getElementById("manualCode").value=""}
+}
+
+async function openScanner(){
+  const box=document.getElementById("scanner");
+  const video=document.getElementById("video");
+  const status=document.getElementById("scanStatus");
+
+  box.style.display="block";
+  scanning=true;
+  lastCode="";
+  lastAt=0;
+
+  try{
+    if(!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatReader){
+      throw new Error("No se pudo cargar el lector.");
+    }
+
+    codeReader=new ZXingBrowser.BrowserMultiFormatReader();
+    status.textContent="Apunta al código de barras…";
+
+    // undefined = elegir automáticamente la cámara, normalmente la trasera.
+    scanControls=await codeReader.decodeFromVideoDevice(
+      undefined,
+      video,
+      (result,error)=>{
+        if(!scanning || !result)return;
+
+        const code=result.getText();
+        const now=Date.now();
+
+        // Evita sumar muchas veces la misma tarrina mientras sigue delante de la cámara.
+        if(code && (code!==lastCode || now-lastAt>1400)){
+          lastCode=code;
+          lastAt=now;
+          add(code);
+          status.textContent="✓ "+code+" añadido";
+        }
+      }
+    );
+  }catch(e){
+    status.textContent="No se pudo iniciar el lector: "+(e.message||e);
+  }
+}
+
+function closeScanner(){
+  scanning=false;
+
+  if(scanControls){
+    try{scanControls.stop()}catch(e){}
+    scanControls=null;
+  }
+
+  if(codeReader){
+    try{codeReader.reset()}catch(e){}
+    codeReader=null;
+  }
+
+  const video=document.getElementById("video");
+  if(video.srcObject){
+    video.srcObject.getTracks().forEach(t=>t.stop());
+    video.srcObject=null;
+  }
+
+  document.getElementById("scanner").style.display="none";
+}
+
+function exportCSV(){
+  const rows=[["codigo","sabor","cantidad"],...Object.entries(db.stock).map(([c,n])=>[c,db.codes[c]||"",n])];
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\r\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"}));
+  a.download="icestock.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function resetData(){
+  if(confirm("¿Borrar todo el inventario?")){
+    db={stock:{},codes:{"S48167":"Helado de Banana Split"}};
+    save();
+  }
+}
+
+if("serviceWorker" in navigator){
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+}
+
+render();
+</script>
+</body>
+</html>
